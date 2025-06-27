@@ -1,92 +1,79 @@
 import os
 import time
 import cv2
-import easyocr
 import random
-import yolov5
+from fast_alpr import ALPR
 from parse_annotation import parse_annotation
 
-MODEL_NAME = 'keremberke/yolov5n-license-plate'
-model  = yolov5.load(MODEL_NAME)
-READER = easyocr.Reader(['en'])
-model.conf = 0.25
-model.iou  = 0.45
+alpr = ALPR(ocr_model='european-plates-mobile-vit-v2-model',
+            detector_model='yolo-v9-t-384-license-plate-end2end')
 
-def detect_and_ocr(img_dir: str, max_images: int = 10, visualize: bool = False):
-    files = [f for f in os.listdir(img_dir)
-             if f.lower().endswith(('.jpg','.png'))]
+def detect_and_ocr(img_dir: str, max_images: int = 0, visualize: bool = False):
+    files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
     if not files:
         return [], 0.0
 
     if max_images and len(files) > max_images:
         files = random.sample(files, max_images)
+
     gt_texts = {f: parse_annotation(f)[1] for f in files}
     results = []
     t0 = time.time()
 
     for fname in files:
         path = os.path.join(img_dir, fname)
-        orig = cv2.imread(path)
-        if orig is None:
+        image = cv2.imread(path)
+        if image is None:
             continue
         gt = gt_texts[fname]
 
-        h0, w0 = orig.shape[:2]
-        scale  = 640 / w0 if w0 > 640 else 1.0
-        small  = cv2.resize(orig, None, fx=scale, fy=scale,
-                            interpolation=cv2.INTER_AREA)
-        preds  = model(small).pred[0]
-        if preds.shape[0] == 0:
-            results.append({'file':fname,'gt_text':gt,
-                            'pred_text':'','ocr_ok':False})
+        detections = alpr.detector.predict(image)
+
+        if not detections:
+            results.append({'file': fname, 'gt_text': gt, 'pred_text': '', 'ocr_ok': False})
             continue
 
-        best = preds[preds[:,4].argmax()]
-        x1,y1,x2,y2 = map(int, best[:4].tolist())
-        x1 = max(0, int(x1/scale));  y1 = max(0, int(y1/scale))
-        x2 = min(w0, int(x2/scale)); y2 = min(h0, int(y2/scale))
+        best_text = ''
+        best_conf = 0.0
 
-        pad  = int(0.05 * max(y2-y1, x2-x1))
-        crop = orig[
-            max(0,   y1-pad):min(h0, y2+pad),
-            max(0,   x1-pad):min(w0, x2+pad)
-        ]
+        for det in detections:
+            box = det.bounding_box
+            y1, y2 = max(0, box.y1), min(image.shape[0], box.y2)
+            x1, x2 = max(0, box.x1), min(image.shape[1], box.x2)
+            if y1 >= y2 or x1 >= x2:
+                continue
 
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        _, bw = cv2.threshold(
-            gray, 0, 255,
-            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-        )
+            crop = image[y1:y2, x1:x2]
+            ocr_out = alpr.ocr.predict(crop)
 
-        bw = cv2.resize(bw, None, fx=1.5, fy=1.5,
-                        interpolation=cv2.INTER_LINEAR)
+            if not ocr_out or not ocr_out.text:
+                continue
 
-        texts = READER.readtext(
-            bw,
-            detail=0,
-            allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-            text_threshold=0.4,
-            low_text=0.3,
-            mag_ratio=1.5
-        )
-        pred = max(texts, key=len).replace(' ','') if texts else ''
+            text = ocr_out.text.strip().upper().replace(" ", "")
+            conf = ocr_out.confidence
 
-        ok = (pred.upper() == gt.upper())
+            if conf > best_conf:
+                best_text = text
+                best_conf = conf
+
+            if visualize:
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(image, text, (x1, max(0, y1 - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+        ok = best_text == gt.upper()
+        print(f"[ALPR] PRED: '{best_text}' (conf: {best_conf:.2f}) | GT: '{gt}' | OK: {ok}")
+
         results.append({
             'file': fname,
             'gt_text': gt,
-            'pred_text': pred,
+            'pred_text': best_text,
             'ocr_ok': ok
         })
 
         if visualize:
-            cv2.rectangle(crop, (pad,pad),
-                          (crop.shape[1]-pad-1,crop.shape[0]-pad-1),
-                          (0,255,0),2)
-            cv2.imshow('plate', cv2.resize(
-                crop, (800, int(800*crop.shape[0]/crop.shape[1]))
-            ))
-            cv2.waitKey(0)
+            cv2.imshow('alpr', crop)
+            key = cv2.waitKey(0)
 
     if visualize:
         cv2.destroyAllWindows()

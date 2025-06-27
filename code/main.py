@@ -5,7 +5,7 @@ import json, time
 def main():
     program_start = time.time()
     img_dir = '../data/photos'
-    results, elapsed = detect_and_ocr(img_dir, max_images=10, visualize=False)
+    results, elapsed = detect_and_ocr(img_dir, max_images=195, visualize=False)
 
     total = len(results)
     correct = sum(r['ocr_ok'] for r in results)
@@ -23,10 +23,11 @@ def main():
         "final_grade": grade,
         "results": results
     }
-    output_path = 'results.json'
+    output_path = '../results.json'
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"Results saved to {output_path}")
 
 if __name__ == '__main__':
+
     main()
